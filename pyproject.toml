@@ -18,6 +18,8 @@ dependencies = [
 gee = ["earthengine-api>=0.1"]
 # Clima raster (WorldClim/CMIP6): zonal stats + I/O parquet del banco de 19 bioclim
 climate = ["rasterio>=1.3", "rasterstats>=0.19", "pyarrow>=14"]
+# BigQuery (SISVAN/nutrición vía Base dos Dados): agregación server-side de microdados
+bigquery = ["google-cloud-bigquery>=3.0", "db-dtypes>=1.0"]
 
 [tool.setuptools]
 packages = ["terracore_engine"]
