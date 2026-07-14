@@ -7,4 +7,7 @@ dist/
 
 # Datos (inputs pesados + outputs regenerables) — no versionar en el repo del motor
 data/
+climate-trace/
 *.parquet
+*.gpkg
+*.csv
