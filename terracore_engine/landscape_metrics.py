@@ -18,7 +18,7 @@ Source: MapBiomas Collection 9
     Period: 1985-2023
 
 Usage:
-    from terracore.scripts.modules.landscape_metrics import extract_landscape_metrics
+    from terracore_engine.landscape_metrics import extract_landscape_metrics
     df = extract_landscape_metrics(gdf, year=2020)
 """
 

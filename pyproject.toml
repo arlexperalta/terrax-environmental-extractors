@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terracore-engine"
+version = "0.1.0"
+description = "TerraCore Data Engine — extractores modulares de datos ambientales/geoespaciales para municipios brasileños"
+requires-python = ">=3.10"
+dependencies = [
+  "geopandas>=1.0",
+  "pandas>=2.0",
+  "requests>=2.28",
+]
+
+[project.optional-dependencies]
+# GEE para conectores basados en Google Earth Engine (MapBiomas / landscape metrics)
+gee = ["earthengine-api>=0.1"]
+
+[tool.setuptools]
+packages = ["terracore_engine"]

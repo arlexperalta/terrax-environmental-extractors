@@ -9,7 +9,7 @@ Source: IBGE Censo Agropecuário 2017 via SIDRA API
     - Table 6853: Area by type
 
 Usage:
-    from terracore.scripts.modules.ibge_census import extract_p_familiar
+    from terracore_engine.ibge_census import extract_p_familiar
     df = extract_p_familiar()
 """
 

@@ -1,0 +1,10 @@
+# Artefactos de build
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# Datos (inputs pesados + outputs regenerables) — no versionar en el repo del motor
+data/
+*.parquet
