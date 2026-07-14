@@ -54,16 +54,25 @@ FQTN = f"{BD_PROJECT}.{BD_DATASET}.{BD_TABLE}"
 MAX_BYTES_BILLED = 20 * 1024 ** 3
 
 # Catálogo de indicadores. Cada uno: columna de diagnóstico + categorías "de riesgo".
-# Columna y categorías VERIFICADAS 2026-07-14 contra la tabla real (PA/AM 2023):
-# estado_nutricional_imc_idade_crianca ∈ {Eutrofia, Risco de sobrepeso, Sobrepeso,
-# Obesidade, Magreza, Magreza acentuada, NULL}. El NULL domina (~74%) porque la fila
-# es de otra fase de vida (adulto/idoso/gestante) → NO cuenta como criança avaliada.
-# La definición fina del indicador (qué categorías = riesgo) la valida Adrian (T6).
+# Columnas y categorías VERIFICADAS 2026-07-14 contra la tabla real (PA/AM 2023):
+#   estado_nutricional_altura_idade_crianca ∈ {Estatura adequada, Baixa estatura para
+#     idade, Muito baixa estatura para idade, NULL}   → stunting (déficit CRÔNICO)
+#   estado_nutricional_imc_idade_crianca    ∈ {Eutrofia, Risco de sobrepeso, Sobrepeso,
+#     Obesidade, Magreza, Magreza acentuada, NULL}    → wasting (déficit AGUDO)
+# El NULL domina (~74%) porque la fila es de otra fase de vida (adulto/idoso/gestante)
+# → NO cuenta como criança avaliada (el denominador excluye NULL, ver extract_sisvan).
+# Para vulnerabilidade territorial estructural el proxy fuerte es el CRÔNICO (stunting);
+# el banco lleva ambos y el análisis downstream pesa el que su marco requiera (T6).
 INDICATORS = {
-    "desnutricao_infantil": {
+    "desnutricao_cronica": {
+        "col": "estado_nutricional_altura_idade_crianca",
+        "risco": ["Baixa estatura para idade", "Muito baixa estatura para idade"],
+        "desc": "% de crianças com déficit de estatura-para-idade (stunting) — vulnerabilidade crônica",
+    },
+    "desnutricao_aguda": {
         "col": "estado_nutricional_imc_idade_crianca",
         "risco": ["Magreza", "Magreza acentuada"],
-        "desc": "% de crianças com magreza/magreza acentuada (IMC-para-idade), SISVAN",
+        "desc": "% de crianças com magreza/magreza acentuada (IMC-para-idade, wasting)",
     },
     "obesidade_infantil": {
         "col": "estado_nutricional_imc_idade_crianca",
@@ -200,6 +209,35 @@ def extract_sisvan(
     return out
 
 
+def extract_sisvan_panel(
+    indicators: list[str] | None = None,
+    estados: list[str] | None = None,
+    ano: int = 2023,
+) -> pd.DataFrame:
+    """
+    Panel nutricional: varios indicadores en un solo CSV (una fila por município),
+    para que el orquestador lo consuma como capa única. Cada indicador aporta su
+    prevalência y su denominador propio `n_avaliados_<ind>` — que puede diferir entre
+    índices (crianças avaliadas por altura-idade ≠ por IMC-idade).
+
+    Default = [crônica (stunting), aguda (wasting)]: el banco lleva ambas dimensiones
+    y el análisis downstream pesa la que su marco requiera.
+    """
+    indicators = indicators or ["desnutricao_cronica", "desnutricao_aguda"]
+    estados = estados or ["PA", "AM"]
+
+    panel = None
+    for ind in indicators:
+        df = extract_sisvan(estados=estados, ano=ano, indicator=ind)
+        sub = df[["code_muni", "NM_MUN", "SIGLA_UF", "n_avaliados", f"prev_{ind}"]].rename(
+            columns={"n_avaliados": f"n_avaliados_{ind}"})
+        panel = sub if panel is None else panel.merge(
+            sub.drop(columns=["NM_MUN", "SIGLA_UF"]), on="code_muni")
+
+    save_processed(panel, f"pa_am_sisvan_panel_{ano}.csv", name="SISVAN-PANEL")
+    return panel
+
+
 if __name__ == "__main__":
     import sys
     print("=" * 60)
@@ -208,7 +246,7 @@ if __name__ == "__main__":
     if "--discover" in sys.argv:
         discover_schema()
     else:
-        df = extract_sisvan(estados=["PA", "AM"], ano=2023)
-        print(f"\n✓ {df['n_avaliados'].gt(0).sum()}/{len(df)} municipios con crianças avaliadas")
-        print(df[["NM_MUN", "SIGLA_UF", "n_acompanhamentos", "n_avaliados",
-                  "prev_desnutricao_infantil"]].head(6).to_string(index=False))
+        panel = extract_sisvan_panel(estados=["PA", "AM"], ano=2023)
+        prev_cols = [c for c in panel.columns if c.startswith("prev_")]
+        print(f"\n✓ panel nutricional: {len(panel)} municípios × {len(prev_cols)} indicadores")
+        print(panel[["NM_MUN", "SIGLA_UF"] + prev_cols].head(6).to_string(index=False))
