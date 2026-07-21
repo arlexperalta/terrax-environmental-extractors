@@ -108,21 +108,56 @@ def download_worldclim(res: str = RES) -> None:
 # --------------------------------------------------------------------------- #
 # Zonal stats
 # --------------------------------------------------------------------------- #
-def _zonal_mean(gdf, raster: Path, band: int) -> list[float | None]:
-    """Media zonal de una banda por polígono (all_touched → cubre munis chicos a 18 km)."""
-    stats = zonal_stats(gdf.geometry, str(raster), band=band,
-                        stats="mean", all_touched=True, nodata=-3.4e38)
-    return [s["mean"] for s in stats]
+_STATS = ["mean", "std", "max"]
+
+
+def _zonal_stats3(gdf, raster: Path, band: int) -> list[dict]:
+    """
+    Estadísticos zonales por polígono: media + SD + máximo intra-município
+    (all_touched → cubre munis chicos a 18 km). El SD/máx capturan la
+    heterogeneidad espacial del clima DENTRO del município (relevante en Pará,
+    donde los munis son enormes): la media sola la promedia y la esconde.
+    `count` = nº de celdas raster que caen en el polígono (diagnóstico: con 1
+    sola celda el SD no es informativo).
+    """
+    return zonal_stats(gdf.geometry, str(raster), band=band,
+                       stats="mean std max count", all_touched=True, nodata=-3.4e38)
+
+
+def _nanmean(vals: list[float | None]) -> float | None:
+    """Media ignorando None (ensemble de GCMs); None si todos son None."""
+    present = [v for v in vals if v is not None]
+    return sum(present) / len(present) if present else None
+
+
+def _scope_tag(estados: list[str]) -> str:
+    """Prefijo de archivo derivado del scope ('pa', 'pa_am', ...)."""
+    return "_".join(sorted(e.strip().lower() for e in estados))
+
+
+# Subconjunto interpretable que va al CSV consolidable (el parquet lleva las 19):
+# temp media anual, estacionalidade térmica, precip anual, precip do mês mais
+# úmido/seco, estacionalidade da precip. Capturan el cambio y los extremos /
+# lluvias erráticas (el aquecimento medio bio1 satura; estos discriminan).
+SUBSET = [1, 4, 12, 13, 14, 15]
+SUBSET_DESC = {
+    1: "temp media anual", 4: "estacionalidade térmica", 12: "precip anual",
+    13: "precip mês mais úmido", 14: "precip mês mais seco", 15: "estacionalidade precip",
+}
 
 
 def extract_worldclim(estados: list[str] | None = None, res: str = RES) -> pd.DataFrame:
     """
-    Extrae el banco climático WorldClim/CMIP6 por município (presente + 2050 + anomalías).
+    Extrae el banco climático WorldClim/CMIP6 por município: media + SD + máximo
+    intra-município del presente y de cada SSP 2050, más la anomalía (delta) de la
+    media. El SD/máx dan la variabilidad ESPACIAL dentro del município; la anomalía
+    da el cambio TEMPORAL presente→2050 (el foco de Adrian: dónde va a cambiar).
 
     Returns
     -------
-    DataFrame consolidable (contrato motor): code_muni, NM_MUN, SIGLA_UF,
-    bio1/bio12 present + por SSP + anomalías. (El banco completo de 19 bio va al parquet.)
+    DataFrame consolidable (contrato motor): code_muni, NM_MUN, SIGLA_UF, y para el
+    subconjunto interpretable de bio: anomalía media por SSP + SD/máx intra-muni del
+    presente. (El banco completo de 19 bio × {present,ssp} × {mean,std,max} va al parquet.)
     """
     estados = estados or ["PA", "AM"]
     munis = load_municipalities(estados=estados)
@@ -140,69 +175,76 @@ def extract_worldclim(estados: list[str] | None = None, res: str = RES) -> pd.Da
     # WorldClim es WGS84 (EPSG:4326); la malha IBGE es SIRGAS 2000 → reproyectar.
     gdf = munis.to_crs(4326)
     wide = munis[["code_muni", "NM_MUN", "SIGLA_UF"]].copy()
+    full: dict[str, list] = {}
+    n_muni = len(gdf)
 
     # --- Presente (1970-2000): 19 tifs separados, 1 banda c/u ---
-    print(f"  presente (1970-2000) — {N_BIO} bioclim, {len(gdf)} municipios...")
-    full = {}
+    print(f"  presente (1970-2000) — {N_BIO} bioclim × mean/std/max, {n_muni} municipios...")
     for i in range(1, N_BIO + 1):
-        full[f"bio{i}_present"] = _zonal_mean(gdf, hist[i - 1], band=1)
+        s = _zonal_stats3(gdf, hist[i - 1], band=1)
+        for st in _STATS:
+            full[f"bio{i}_present_{st}"] = [x[st] for x in s]
+        if i == 1:                       # nº de celdas por muni (diagnóstico, una vez)
+            full["n_cells"] = [x["count"] for x in s]
 
-    # --- Futuro 2050: ensemble (media de los 3 GCMs) por SSP; tif multibanda 19 ---
+    # --- Futuro 2050: ensemble (media sobre los 3 GCMs de cada stat) por SSP ---
     for ssp in SSPS:
-        print(f"  futuro 2050 {ssp} — ensemble de {len(GCMS)} GCMs...")
+        print(f"  futuro 2050 {ssp} — ensemble de {len(GCMS)} GCMs × mean/std/max...")
+        per_gcm = {g: [_zonal_stats3(gdf, fut[(g, ssp)], band=i) for i in range(1, N_BIO + 1)]
+                   for g in GCMS}
         for i in range(1, N_BIO + 1):
-            per_gcm = [_zonal_mean(gdf, fut[(g, ssp)], band=i) for g in GCMS]
-            # media de los GCMs, celda a celda (ignora None de algún GCM aislado)
-            ens = [
-                (sum(v for v in vals if v is not None) / len([v for v in vals if v is not None]))
-                if any(v is not None for v in vals) else None
-                for vals in zip(*per_gcm)
-            ]
-            full[f"bio{i}_{ssp}"] = ens
+            for st in _STATS:
+                # ensemble = media de la stat sobre los GCMs, município a município
+                full[f"bio{i}_{ssp}_{st}"] = [
+                    _nanmean([per_gcm[g][i - 1][k][st] for g in GCMS])
+                    for k in range(n_muni)
+                ]
 
-    # --- Anomalías: futuro - presente, por SSP, las 19 ---
+    # --- Anomalías (delta) de la MEDIA: futuro − presente, por SSP, las 19 ---
     for ssp in SSPS:
         for i in range(1, N_BIO + 1):
-            p = full[f"bio{i}_present"]
-            fu = full[f"bio{i}_{ssp}"]
+            p = full[f"bio{i}_present_mean"]
+            fu = full[f"bio{i}_{ssp}_mean"]
             full[f"bio{i}_anom_{ssp}"] = [
                 (b - a) if (a is not None and b is not None) else None
                 for a, b in zip(p, fu)
             ]
 
-    # Banco completo de las 19 → parquet (insumo SDM).
+    # Banco completo de las 19 (× present/ssp × mean/std/max + anom) → parquet (insumo SDM).
     full_df = munis[["code_muni", "NM_MUN", "SIGLA_UF"]].copy()
     for k, v in full.items():
         full_df[k] = [round(x, 4) if x is not None else None for x in v]
-    save_processed(full_df, f"pa_am_worldclim_bio19_{res}.parquet", name="WorldClimFull")
+    save_processed(full_df, f"{_scope_tag(estados)}_worldclim_bio19_{res}.parquet",
+                   name="WorldClimFull")
 
-    # Banco consolidable → CSV (contrato motor): solo macro (bio1 temp, bio12 precip).
-    for bio in MACRO:
-        wide[f"{bio}_present"] = [round(x, 2) if x is not None else None
-                                 for x in full[f"{bio}_present"]]
+    # Banco consolidable → CSV (contrato motor): subconjunto interpretable.
+    #   anom (delta medio) por SSP + SD y máx intra-muni del presente.
+    for i in SUBSET:
         for ssp in SSPS:
-            wide[f"{bio}_{ssp}_2050"] = [round(x, 2) if x is not None else None
-                                         for x in full[f"{bio}_{ssp}"]]
-            wide[f"{bio}_anom_{ssp}"] = [round(x, 2) if x is not None else None
-                                         for x in full[f"{bio}_anom_{ssp}"]]
+            wide[f"bio{i}_anom_{ssp}"] = [round(x, 3) if x is not None else None
+                                         for x in full[f"bio{i}_anom_{ssp}"]]
+        wide[f"bio{i}_present_sd"] = [round(x, 3) if x is not None else None
+                                     for x in full[f"bio{i}_present_std"]]
+        wide[f"bio{i}_present_max"] = [round(x, 3) if x is not None else None
+                                      for x in full[f"bio{i}_present_max"]]
 
     validate_output(
         wide,
-        expected_cols=["code_muni", "bio1_present", "bio1_anom_ssp585",
-                       "bio12_present", "bio12_anom_ssp585"],
+        expected_cols=["code_muni", "bio1_anom_ssp585", "bio15_anom_ssp585",
+                       "bio15_present_sd"],
         n_expected=len(munis), name="WorldClim",
     )
-    save_processed(wide, f"pa_am_worldclim_{res}.csv", name="WorldClim")
+    save_processed(wide, f"{_scope_tag(estados)}_worldclim_{res}.csv", name="WorldClim")
     return wide
 
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("TerraCore Engine — Clima WorldClim/CMIP6 PA/AM (paper Gomes 2025)")
+    print("TerraCore Engine — Clima WorldClim/CMIP6 Pará (paper Gomes 2025)")
     print("=" * 60)
     download_worldclim()
-    df = extract_worldclim(estados=["PA", "AM"])
+    df = extract_worldclim(estados=["PA"])
     print(f"\n✓ {len(df)} municipios")
-    cols = ["NM_MUN", "SIGLA_UF", "bio1_present", "bio1_anom_ssp245",
-            "bio1_anom_ssp585", "bio12_anom_ssp585"]
+    cols = ["NM_MUN", "bio1_anom_ssp245", "bio1_anom_ssp585",
+            "bio15_anom_ssp585", "bio15_present_sd"]
     print(df[cols].head(6).to_string(index=False))

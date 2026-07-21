@@ -42,6 +42,8 @@ from .base import load_municipalities, save_processed, PROCESSED_DIR
 # como gap de cobertura; se reportan como conteo de ítems presentes. La imputación
 # 0-vs-NaN del dato es decisión de Adrian (T6), aquí no se toca.
 LAYERS = [
+    {"key": "regioes", "file": "pa_regions_ibge.csv",
+     "drop": [], "vintage": "IBGE localidades (meso/micro + intermediária/imediata)"},
     {"key": "producao", "file": "pa_am_crop_production.csv", "sparse": True,
      "drop": ["NM_MUN", "SIGLA_UF"], "vintage": "IBGE PAM 5457 + PEVS 289 (2023)"},
     {"key": "forest_cover", "file": "pa_am_forest_cover_2023.csv",
@@ -53,8 +55,9 @@ LAYERS = [
      "vintage": "SISVAN/Base dos Dados (2023): crônica (stunting) + aguda (wasting)"},
     {"key": "uai", "file": "pa_am_uai.csv",
      "drop": [], "vintage": "IBGE MUNIC / Di Giulio (nacional)"},
-    {"key": "clima", "file": "pa_am_worldclim_10m.csv",
-     "drop": ["NM_MUN", "SIGLA_UF"], "vintage": "WorldClim 2.1 / CMIP6 SSP 2050"},
+    {"key": "clima", "file": "pa_worldclim_10m.csv",
+     "drop": ["NM_MUN", "SIGLA_UF"],
+     "vintage": "WorldClim 2.1 / CMIP6 SSP 2050 — delta + SD/máx intra-muni"},
 ]
 
 # Columnas de identidad del banco (vienen de la malha, no cuentan como "variable").
@@ -179,13 +182,13 @@ def _print_summary(banco: pd.DataFrame, provenance: dict, data_cols: list[str]) 
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("TerraCore Engine — Orquestador banco municipal PA/AM")
+    print("TerraCore Engine — Orquestador banco municipal Pará (v2)")
     print("=" * 60)
-    banco, cobertura = build_gradient(estados=["PA", "AM"])
+    banco, cobertura = build_gradient(estados=["PA"], out_name="municipios_gradient_PA.csv")
     gaps = cobertura[cobertura["capas_faltantes"] != ""]
     if len(gaps):
         print(f"\n{len(gaps)} município(s) con gaps de cobertura (primeros 10):")
         print(gaps[["NM_MUN", "SIGLA_UF", "pct_completo", "capas_faltantes"]]
               .head(10).to_string(index=False))
     else:
-        print("\nSin gaps de cobertura: todas las capas cubren los 206 municípios.")
+        print(f"\nSin gaps de cobertura: todas las capas cubren los {len(banco)} municípios.")
