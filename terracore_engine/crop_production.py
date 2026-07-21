@@ -29,18 +29,23 @@ import requests
 
 from .base import load_municipalities, validate_output, save_processed
 
-SIDRA_VALUES = "https://apisidra.ibge.gov.br/values/t/{t}/n6/all/v/{v}/p/{p}/{cl}/{prod}"
+# Pedimos SOLO los municípios del scope (n6/<códigos>), no `n6/all` (todo Brasil):
+# bajar los 5.570 munis eran ~5.6 MB por llamada → resets/IncompleteRead. Con 206
+# códigos el payload cae ~27× y la descarga es estable.
+SIDRA_VALUES = "https://apisidra.ibge.gov.br/values/t/{t}/n6/{munis}/v/{v}/p/{p}/{cl}/{prod}"
 PERIODS_URL = "https://servicodados.ibge.gov.br/api/v3/agregados/{t}/periodos"
 
 # Catálogo de cultivos dependientes de polinizadores para el assessment PA/AM.
-# var_qty/var_val = códigos de variável SIDRA por tabla.
-#   PAM 5457:  214 = quantidade produzida (t), 215 = valor da produção (mil R$)
-#   PEVS 289:  144 = quantidade produzida,      145 = valor da produção (mil R$)
+# var_qty/var_val/var_area = códigos de variável SIDRA por tabla.
+#   PAM 5457:  214 = quantidade (t), 215 = valor (mil R$), 8331 = área plantada (ha)
+#   PEVS 289:  144 = quantidade,     145 = valor (mil R$)  — extração NÃO tem área
+# El área plantada solo existe para las lavouras permanentes (PAM): la extração
+# vegetal (PEVS: castanha, açaí extrativo) es coleta na floresta, sin hectare plantado.
 CROPS = [
     {"crop": "cacau",           "source": "PAM",  "table": "5457", "classif": "c782",
-     "product": "40138", "var_qty": "214", "var_val": "215"},   # Cacau (em amêndoa)
+     "product": "40138", "var_qty": "214", "var_val": "215", "var_area": "8331"},   # Cacau (em amêndoa)
     {"crop": "acai_cultivo",    "source": "PAM",  "table": "5457", "classif": "c782",
-     "product": "45982", "var_qty": "214", "var_val": "215"},   # Açaí (lavoura permanente)
+     "product": "45982", "var_qty": "214", "var_val": "215", "var_area": "8331"},   # Açaí (lavoura permanente)
     {"crop": "castanha_para",   "source": "PEVS", "table": "289", "classif": "c193",
      "product": "3405", "var_qty": "144", "var_val": "145"},    # Castanha-do-pará
     {"crop": "acai_extrativo",  "source": "PEVS", "table": "289", "classif": "c193",
@@ -101,11 +106,25 @@ def _parse_sidra(records: list[dict], value_name: str) -> pd.DataFrame:
 
 
 def _fetch(table: str, var: str, classif: str, product: str, periods: list[str],
-           value_name: str) -> pd.DataFrame:
-    url = SIDRA_VALUES.format(t=table, v=var, p=",".join(periods), cl=classif, prod=product)
-    r = requests.get(url, timeout=180)
-    r.raise_for_status()
-    return _parse_sidra(r.json(), value_name)
+           value_name: str, munis: str, retries: int = 3) -> pd.DataFrame:
+    # Reintenta con backoff ante errores de red transitorios (reset, timeout,
+    # descarga incompleta). No es loop ciego: solo errores de transporte, no HTTP 4xx/5xx.
+    url = SIDRA_VALUES.format(t=table, v=var, p=",".join(periods), cl=classif,
+                             prod=product, munis=munis)
+    transient = (requests.ConnectionError, requests.Timeout,
+                 requests.exceptions.ChunkedEncodingError)
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.get(url, timeout=300)
+            r.raise_for_status()
+            return _parse_sidra(r.json(), value_name)
+        except transient as e:
+            if attempt == retries:
+                raise
+            wait = 5 * attempt
+            print(f"    reintento {attempt}/{retries - 1} tras {type(e).__name__} "
+                  f"(espera {wait}s)...")
+            time.sleep(wait)
 
 
 def extract_crop_production(
@@ -123,6 +142,7 @@ def extract_crop_production(
     estados = estados or ["PA", "AM"]
     munis = load_municipalities(estados=estados)
     valid = set(munis["code_muni"])
+    muni_codes = ",".join(sorted(valid))            # n6 explícito: solo el scope, no all
     result = munis[["code_muni", "NM_MUN", "SIGLA_UF"]].copy()
 
     expected = ["code_muni"]
@@ -130,10 +150,13 @@ def extract_crop_production(
         periods = _last_n_periods(crop["table"], n_years)
         print(f"  {crop['crop']} ({crop['source']} t{crop['table']}, "
               f"prod {periods[0]}-{periods[-1]})...")
-        for kind, var in [("prod", crop["var_qty"]), ("valor", crop["var_val"])]:
+        kinds = [("prod", crop["var_qty"]), ("valor", crop["var_val"])]
+        if crop.get("var_area"):                     # área plantada: solo PAM (permanentes)
+            kinds.append(("area", crop["var_area"]))
+        for kind, var in kinds:
             colname = f"{crop['crop']}_{kind}_mean"
             raw = _fetch(crop["table"], var, crop["classif"], crop["product"],
-                         periods, colname)
+                         periods, colname, munis=muni_codes)
             raw = raw[raw["code_muni"].isin(valid)]
             agg = raw.groupby("code_muni")[colname].mean()
             result[colname] = result["code_muni"].map(agg)

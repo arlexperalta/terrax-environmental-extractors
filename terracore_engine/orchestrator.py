@@ -46,6 +46,8 @@ LAYERS = [
      "drop": [], "vintage": "IBGE localidades (meso/micro + intermediária/imediata)"},
     {"key": "producao", "file": "pa_am_crop_production.csv", "sparse": True,
      "drop": ["NM_MUN", "SIGLA_UF"], "vintage": "IBGE PAM 5457 + PEVS 289 (2023)"},
+    {"key": "diversidade", "file": "pa_am_agri_diversity.csv",
+     "drop": [], "vintage": "derivado: Shannon/riqueza polinizador-dependientes (valor R$)"},
     {"key": "forest_cover", "file": "pa_am_forest_cover_2023.csv",
      "drop": ["NM_MUN", "SIGLA_UF", "year"], "vintage": "MapBiomas Col9 (2023)"},
     {"key": "pobreza", "file": "pa_am_poverty_cadunico.csv",
