@@ -109,7 +109,68 @@ def extract_population_race(estados: list[str] | None = None,
     return out
 
 
+TABELA_TI = "9719"   # População residente em terras indígenas (Censo 2022)
+
+
+def extract_terras_indigenas(estados: list[str] | None = None,
+                             save: bool = True) -> pd.DataFrame:
+    """
+    Presencia de terras indígenas por município, vía población residente en ellas.
+
+    Adrian pidió (27/07/2026): *"determinar si hay o no territorio indígena
+    declarado en cada município, y determinar su extensión."*
+
+    **Esto resuelve la primera mitad, no la segunda.** La tabla 9719 del Censo
+    2022 da población residente en terras indígenas y admite nivel município
+    (N6), así que sirve para saber si hay TI y cuánta gente vive en ella. La
+    **extensión en km²** es geometría: exige el shapefile de la FUNAI cruzado con
+    la malha municipal, y eso no sale de SIDRA.
+
+    Un município puede tener TI declarada con población muy baja, así que
+    `tem_terra_indigena` es un piso, no la verdad cartográfica.
+    """
+    estados = estados or ["PA"]
+    partes = []
+    for uf in estados:
+        cod = UF_COD[uf]
+        url = (f"{SIDRA}/t/{TABELA_TI}/n6/in%20n3%20{cod}"
+               f"/v/allxp/p/{ANO}/h/y")
+        r = requests.get(url, timeout=300)
+        r.raise_for_status()
+        raw = r.json()
+        if len(raw) > 1:
+            partes.append(pd.DataFrame(raw[1:]))
+    if not partes:
+        raise RuntimeError("SIDRA no devolvió datos de terras indígenas")
+
+    raw = pd.concat(partes, ignore_index=True)
+    raw["code_muni"] = raw["D1C"].astype(int)
+    raw["valor"] = pd.to_numeric(raw["V"], errors="coerce")
+
+    # Se toma el máximo por município: las variables de la tabla son cortes de
+    # la misma población (total / indígena / por quesito), no sumandos.
+    pop_ti = (raw.groupby("code_muni")["valor"].max()
+              .rename("pop_em_terra_indigena").reset_index())
+
+    munis = pd.DataFrame(load_municipalities(estados=estados))[["code_muni"]]
+    munis["code_muni"] = munis["code_muni"].astype(int)
+    out = munis.merge(pop_ti, on="code_muni", how="left")
+    # Sin dato en esta tabla = el município no tiene TI con población censada.
+    out["pop_em_terra_indigena"] = out["pop_em_terra_indigena"].fillna(0)
+    out["tem_terra_indigena"] = (out["pop_em_terra_indigena"] > 0).astype(int)
+
+    validate_output(out,
+                    expected_cols=["code_muni", "pop_em_terra_indigena",
+                                   "tem_terra_indigena"],
+                    n_expected=len(munis), name="terras_indigenas")
+    if save:
+        save_processed(out, f"{'_'.join(e.lower() for e in estados)}_terras_indigenas.csv")
+    return out
+
+
 if __name__ == "__main__":
     df = extract_population_race(estados=["PA"])
     print(df[["code_muni", "pop_total_censo2022",
               "prop_branca", "prop_indigena"]].describe())
+    ti = extract_terras_indigenas(estados=["PA"])
+    print(f"\nmunicípios con terra indígena: {ti.tem_terra_indigena.sum()}/{len(ti)}")
